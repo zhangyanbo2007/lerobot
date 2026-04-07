@@ -320,6 +320,10 @@ def get_safe_version(repo_id: str, version: str | packaging.version.Version) -> 
     Returns the version if available on repo or the latest compatible one.
     Otherwise, will throw a `CompatibilityError`.
     """
+    # Skip hub connection for local datasets (repo_id is None or empty)
+    if repo_id is None or repo_id == "" or repo_id == "None":
+        return str(version) if version else CODEBASE_VERSION
+
     target_version = (
         packaging.version.parse(version) if not isinstance(version, packaging.version.Version) else version
     )

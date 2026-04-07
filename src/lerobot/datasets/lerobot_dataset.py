@@ -485,6 +485,12 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
         self.episode_data_index = get_episode_data_index(self.meta.episodes, self.episodes)
 
+        # Create mapping from actual episode_index to contiguous index in episode_data_index
+        # This is needed when episode indices are non-contiguous (e.g., [0,1,2,...,15,19])
+        # If episodes is None, use all episodes from meta
+        episodes_to_use = self.episodes if self.episodes is not None else list(self.meta.episodes.keys())
+        self._episode_index_to_contiguous = {ep_idx: i for i, ep_idx in enumerate(episodes_to_use)}
+
         # Check timestamps
         timestamps = torch.stack(self.hf_dataset["timestamp"]).numpy()
         episode_indices = torch.stack(self.hf_dataset["episode_index"]).numpy()
@@ -706,9 +712,12 @@ class LeRobotDataset(torch.utils.data.Dataset):
         item = self.hf_dataset[idx]
         ep_idx = item["episode_index"].item()
 
+        # Map actual episode_index to contiguous index in episode_data_index
+        contiguous_ep_idx = self._episode_index_to_contiguous[ep_idx]
+
         query_indices = None
         if self.delta_indices is not None:
-            query_indices, padding = self._get_query_indices(idx, ep_idx)
+            query_indices, padding = self._get_query_indices(idx, contiguous_ep_idx)
             query_result = self._query_hf_dataset(query_indices)
             item = {**item, **padding}
             for key, val in query_result.items():

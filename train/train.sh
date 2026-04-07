@@ -1,0 +1,1 @@
+CUDA_VISIBLE_DEVICES=0 python src/lerobot/scripts/train.py --dataset.repo_id=None --dataset.root=/code/project/lerobot/so101_dataset --policy.type=act --output_dir=outputs/train/act_so101_test --job_name=act_so101_test --policy.device=cuda --wandb.enable=false --policy.push_to_hub=false
