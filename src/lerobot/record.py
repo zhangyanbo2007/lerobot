@@ -335,62 +335,64 @@ def record(cfg: RecordConfig) -> LeRobotDataset:
 
     listener, events = init_keyboard_listener()
 
-    with VideoEncodingManager(dataset):
-        recorded_episodes = 0
-        while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
-            log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
-            record_loop(
-                robot=robot,
-                events=events,
-                fps=cfg.dataset.fps,
-                teleop=teleop,
-                policy=policy,
-                dataset=dataset,
-                control_time_s=cfg.dataset.episode_time_s,
-                single_task=cfg.dataset.single_task,
-                display_data=cfg.display_data,
-            )
-
-            # Execute a few seconds without recording to give time to manually reset the environment
-            # Skip reset for the last episode to be recorded
-            if not events["stop_recording"] and (
-                (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
-            ):
-                log_say("Reset the environment", cfg.play_sounds)
+    try:
+        with VideoEncodingManager(dataset):
+            recorded_episodes = 0
+            while recorded_episodes < cfg.dataset.num_episodes and not events["stop_recording"]:
+                log_say(f"Recording episode {dataset.num_episodes}", cfg.play_sounds)
                 record_loop(
                     robot=robot,
                     events=events,
                     fps=cfg.dataset.fps,
                     teleop=teleop,
-                    control_time_s=cfg.dataset.reset_time_s,
+                    policy=policy,
+                    dataset=dataset,
+                    control_time_s=cfg.dataset.episode_time_s,
                     single_task=cfg.dataset.single_task,
                     display_data=cfg.display_data,
                 )
 
-            if events["rerecord_episode"]:
-                log_say("Re-record episode", cfg.play_sounds)
-                events["rerecord_episode"] = False
-                events["exit_early"] = False
-                dataset.clear_episode_buffer()
-                continue
+                # Execute a few seconds without recording to give time to manually reset the environment
+                # Skip reset for the last episode to be recorded
+                if not events["stop_recording"] and (
+                    (recorded_episodes < cfg.dataset.num_episodes - 1) or events["rerecord_episode"]
+                ):
+                    log_say("Reset the environment", cfg.play_sounds)
+                    record_loop(
+                        robot=robot,
+                        events=events,
+                        fps=cfg.dataset.fps,
+                        teleop=teleop,
+                        control_time_s=cfg.dataset.reset_time_s,
+                        single_task=cfg.dataset.single_task,
+                        display_data=cfg.display_data,
+                    )
 
-            dataset.save_episode()
-            recorded_episodes += 1
+                if events["rerecord_episode"]:
+                    log_say("Re-record episode", cfg.play_sounds)
+                    events["rerecord_episode"] = False
+                    events["exit_early"] = False
+                    dataset.clear_episode_buffer()
+                    continue
 
-    log_say("Stop recording", cfg.play_sounds, blocking=True)
+                dataset.save_episode()
+                recorded_episodes += 1
 
-    robot.disconnect()
-    if teleop is not None:
-        teleop.disconnect()
+        log_say("Stop recording", cfg.play_sounds, blocking=True)
 
-    if not is_headless() and listener is not None:
-        listener.stop()
+        if cfg.dataset.push_to_hub:
+            dataset.push_to_hub(tags=cfg.dataset.tags, private=cfg.dataset.private)
 
-    if cfg.dataset.push_to_hub:
-        dataset.push_to_hub(tags=cfg.dataset.tags, private=cfg.dataset.private)
+        log_say("Exiting", cfg.play_sounds)
+        return dataset
 
-    log_say("Exiting", cfg.play_sounds)
-    return dataset
+    finally:
+        # 确保无论发生什么错误都释放设备，避免摄像头/机械臂被锁住
+        robot.disconnect()
+        if teleop is not None:
+            teleop.disconnect()
+        if not is_headless() and listener is not None:
+            listener.stop()
 
 
 def main():
