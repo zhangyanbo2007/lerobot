@@ -1,26 +1,31 @@
 #!/usr/bin/env python3
-"""Loss 图查看 Web 服务 - 可切换查看不同训练的 loss 曲线"""
+"""Loss 图查看 Web 服务 - 可切换查看不同训练的 loss 曲线，带进度条"""
 import os
 import json
 import glob
 import re
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from datetime import datetime
+import threading
+import time
 
 LOGS_DIR = "/code/project/lerobot/outputs/logs"
+TOTAL_STEPS = 100000
 
 def parse_log(log_file):
     """解析日志文件，提取 step 和 loss"""
     steps = []
     losses = []
+    timestamps = []
     if not os.path.exists(log_file):
-        return steps, losses
+        return steps, losses, timestamps
 
     pattern = r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*step:(\d+K?) smpl:\d+K? ep:[\dK]+ epch:[\d.]+ loss:([\d.]+)"
     with open(log_file, 'r') as f:
         for line in f:
             match = re.search(pattern, line)
             if match:
+                ts = match.group(1)
                 step_str = match.group(2)
                 if step_str.endswith('K'):
                     step = int(step_str[:-1]) * 1000
@@ -29,7 +34,8 @@ def parse_log(log_file):
                 loss = float(match.group(3))
                 steps.append(step)
                 losses.append(loss)
-    return steps, losses
+                timestamps.append(ts)
+    return steps, losses, timestamps
 
 def get_training_runs():
     """获取所有训练记录"""
@@ -38,7 +44,7 @@ def get_training_runs():
 
     for log_file in sorted(log_files, key=os.path.getmtime, reverse=True):
         filename = os.path.basename(log_file)
-        if filename.startswith("monitor_") or "monitor" in filename:
+        if filename.startswith("monitor_") or "monitor" in filename or filename.startswith("loss_viewer"):
             continue
 
         # 从文件名提取信息 act_so101_20260407_010247_v0.log
@@ -54,11 +60,22 @@ def get_training_runs():
             date = filename.replace(".log", "")
             version = ""
 
-        steps, losses = parse_log(log_file)
+        steps, losses, timestamps = parse_log(log_file)
+        final_step = steps[-1] if steps else 0
+        final_loss = losses[-1] if losses else 0
 
-        # 检查是否有对应的 loss 图片
-        png_file = log_file.replace(".log", "_loss.png")
-        has_png = os.path.exists(png_file)
+        # 计算进度
+        progress = round(final_step / TOTAL_STEPS * 100, 1) if final_step > 0 else 0
+        is_complete = final_step >= TOTAL_STEPS
+        is_running = check_if_running(filename)
+
+        # 判断状态
+        if is_running:
+            status = "running"
+        elif is_complete:
+            status = "complete"
+        else:
+            status = "interrupted"
 
         runs.append({
             "filename": filename,
@@ -69,14 +86,27 @@ def get_training_runs():
             "version": version,
             "steps": steps,
             "losses": losses,
-            "final_step": steps[-1] if steps else 0,
-            "final_loss": losses[-1] if losses else 0,
-            "has_png": has_png,
-            "log_path": log_file,
-            "png_path": png_file if has_png else None
+            "final_step": final_step,
+            "final_loss": final_loss,
+            "progress": progress,
+            "status": status,
+            "last_timestamp": timestamps[-1] if timestamps else None,
         })
 
     return runs
+
+def check_if_running(filename):
+    """检查训练是否正在进行"""
+    # 检查是否有对应的训练进程
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", f"train.py.*{filename.replace('.log', '')}"],
+            capture_output=True, text=True
+        )
+        return result.returncode == 0 and result.stdout.strip() != ""
+    except:
+        return False
 
 class LossViewerHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
@@ -91,12 +121,31 @@ class LossViewerHandler(SimpleHTTPRequestHandler):
             filename = self.path.split("/")[-1]
             log_file = os.path.join(LOGS_DIR, filename)
             if os.path.exists(log_file):
-                steps, losses = parse_log(log_file)
+                steps, losses, timestamps = parse_log(log_file)
+                final_step = steps[-1] if steps else 0
+                progress = round(final_step / TOTAL_STEPS * 100, 1) if final_step > 0 else 0
+                is_complete = final_step >= TOTAL_STEPS
+                is_running = check_if_running(filename)
+
+                if is_running:
+                    status = "running"
+                elif is_complete:
+                    status = "complete"
+                else:
+                    status = "interrupted"
+
                 self.send_response(200)
                 self.send_header("Content-type", "application/json")
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
-                self.wfile.write(json.dumps({"steps": steps, "losses": losses}).encode())
+                self.wfile.write(json.dumps({
+                    "steps": steps,
+                    "losses": losses,
+                    "final_step": final_step,
+                    "progress": progress,
+                    "status": status,
+                    "last_timestamp": timestamps[-1] if timestamps else None,
+                }).encode())
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -124,13 +173,19 @@ class LossViewerHandler(SimpleHTTPRequestHandler):
         .run-name { font-weight: bold; margin-bottom: 5px; }
         .run-info { font-size: 12px; color: #888; }
         .run-item.active .run-info { color: #333; }
+        .status-badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; margin-left: 8px; }
+        .status-running { background: #4ade80; color: #000; }
+        .status-complete { background: #00d9ff; color: #000; }
+        .status-interrupted { background: #f59e0b; color: #000; }
         .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 20px; }
         .stat-card { background: #0f3460; padding: 15px; border-radius: 8px; text-align: center; }
         .stat-value { font-size: 24px; font-weight: bold; color: #00d9ff; }
         .stat-label { font-size: 12px; color: #888; margin-top: 5px; }
         .run-item.active .stat-value { color: #000; }
-        .png-preview { margin-top: 10px; text-align: center; }
-        .png-preview img { max-width: 100%; border-radius: 8px; }
+        .progress-bar { width: 100%; height: 30px; background: #0f3460; border-radius: 15px; overflow: hidden; margin: 20px 0; }
+        .progress-fill { height: 100%; background: linear-gradient(90deg, #00d9ff, #00ff88); transition: width 0.5s; display: flex; align-items: center; justify-content: center; color: #000; font-weight: bold; font-size: 14px; }
+        .progress-fill.complete { background: linear-gradient(90deg, #4ade80, #00ff88); }
+        .progress-fill.interrupted { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
         .filter-btn { padding: 8px 12px; margin: 5px; border: none; border-radius: 5px; cursor: pointer; background: #0f3460; color: #eee; transition: all 0.3s; }
         .filter-btn:hover, .filter-btn.active { background: #00d9ff; color: #000; }
         .filters { margin-bottom: 15px; }
@@ -151,6 +206,9 @@ class LossViewerHandler(SimpleHTTPRequestHandler):
                 <div id="runList"></div>
             </div>
             <div>
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progress">0%</div>
+                </div>
                 <div class="stats">
                     <div class="stat-card">
                         <div class="stat-value" id="stat-name">-</div>
@@ -165,16 +223,12 @@ class LossViewerHandler(SimpleHTTPRequestHandler):
                         <div class="stat-label">最终 Loss</div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-value" id="stat-png">-</div>
-                        <div class="stat-label">Loss 图片</div>
+                        <div class="stat-value" id="stat-status">-</div>
+                        <div class="stat-label">状态</div>
                     </div>
                 </div>
                 <div class="chart-container">
                     <canvas id="lossChart"></canvas>
-                </div>
-                <div class="png-preview" id="pngPreview" style="display:none">
-                    <h3>静态预览图</h3>
-                    <img id="pngImage" alt="Loss PNG" />
                 </div>
             </div>
         </div>
@@ -183,6 +237,7 @@ class LossViewerHandler(SimpleHTTPRequestHandler):
         let allRuns = [];
         let currentChart = null;
         let activeFilter = 'all';
+        let currentRunIdx = null;
 
         const ctx = document.getElementById('lossChart').getContext('2d');
 
@@ -196,22 +251,35 @@ class LossViewerHandler(SimpleHTTPRequestHandler):
             const container = document.getElementById('runList');
             container.innerHTML = runs.map((run, idx) => `
                 <div class="run-item" data-idx="${idx}" onclick="selectRun(${idx})">
-                    <div class="run-name">${run.display_name}</div>
-                    <div class="run-info">${run.algo} | ${run.robot} | Steps: ${run.final_step.toLocaleString()}</div>
+                    <div class="run-name">
+                        ${run.display_name}
+                        <span class="status-badge status-${run.status}">${run.status === 'running' ? '训练中' : run.status === 'complete' ? '已完成' : '已中断'}</span>
+                    </div>
+                    <div class="run-info">${run.algo} | ${run.robot} | ${run.progress}% (${run.final_step.toLocaleString()}/${100000})</div>
                 </div>
             `).join('');
         }
 
-        function selectRun(idx) {
+        async function selectRun(idx) {
             document.querySelectorAll('.run-item').forEach((el, i) => {
                 el.classList.toggle('active', i === idx);
             });
 
+            currentRunIdx = idx;
             const run = allRuns[idx];
+
             document.getElementById('stat-name').textContent = run.display_name;
             document.getElementById('stat-step').textContent = run.final_step.toLocaleString();
             document.getElementById('stat-loss').textContent = run.final_loss.toFixed(4);
-            document.getElementById('stat-png').textContent = run.has_png ? '✅ 有' : '❌ 无';
+
+            const statusText = run.status === 'running' ? '训练中' : run.status === 'complete' ? '已完成' : '已中断';
+            document.getElementById('stat-status').textContent = statusText;
+
+            // 更新进度条
+            const progressEl = document.getElementById('progress');
+            progressEl.style.width = run.progress + '%';
+            progressEl.textContent = run.progress + '%';
+            progressEl.className = 'progress-fill ' + run.status;
 
             // 更新图表
             if (currentChart) currentChart.destroy();
@@ -241,14 +309,16 @@ class LossViewerHandler(SimpleHTTPRequestHandler):
                     }
                 }
             });
+        }
 
-            // 显示 PNG 预览
-            const pngPreview = document.getElementById('pngPreview');
-            if (run.has_png) {
-                document.getElementById('pngImage').src = '/api/png/' + run.filename.replace('.log', '_loss.png');
-                pngPreview.style.display = 'block';
-            } else {
-                pngPreview.style.display = 'none';
+        // 定时刷新运行中的训练
+        async function refreshRunning() {
+            await loadRuns();
+            if (currentRunIdx !== null && allRuns[currentRunIdx]) {
+                const run = allRuns[currentRunIdx];
+                if (run.status === 'running') {
+                    selectRun(currentRunIdx);
+                }
             }
         }
 
@@ -267,24 +337,13 @@ class LossViewerHandler(SimpleHTTPRequestHandler):
         });
 
         loadRuns();
+        // 每 5 秒刷新一次运行中的训练
+        setInterval(refreshRunning, 5000);
     </script>
 </body>
 </html>
 """
             self.wfile.write(html.encode())
-        elif self.path.startswith("/api/png/"):
-            filename = self.path.split("/")[-1]
-            png_file = os.path.join(LOGS_DIR, filename)
-            if os.path.exists(png_file):
-                self.send_response(200)
-                self.send_header("Content-type", "image/png")
-                self.send_header("Access-Control-Allow-Origin", "*")
-                self.end_headers()
-                with open(png_file, 'rb') as f:
-                    self.wfile.write(f.read())
-            else:
-                self.send_response(404)
-                self.end_headers()
         else:
             super().do_GET()
 
