@@ -6,8 +6,17 @@ import json
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 import threading
 import time
+import glob
 
-LOG_FILE = "/code/project/lerobot/train.log"
+# 自动查找 outputs/logs/ 下最新的日志文件
+LOGS_DIR = "/code/project/lerobot/outputs/logs"
+def get_latest_log_file():
+    log_files = glob.glob(os.path.join(LOGS_DIR, "*.log"))
+    if not log_files:
+        return os.path.join(LOGS_DIR, "train.log")
+    return max(log_files, key=os.path.getmtime)
+
+LOG_FILE = get_latest_log_file()
 TOTAL_STEPS = 100000
 
 training_data = {
