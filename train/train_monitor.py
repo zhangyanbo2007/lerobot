@@ -6,12 +6,14 @@ import json
 import glob
 import subprocess
 from http.server import HTTPServer, SimpleHTTPRequestHandler
-from datetime import datetime
+from datetime import datetime, timedelta
 import threading
 import time
 
 LOGS_DIR = "/code/project/lerobot/outputs/logs"
 TOTAL_STEPS = 100000
+# 服务器使用 UTC 时间，北京时间 +8 小时
+UTC_TO_BEIJING_HOURS = 8
 
 def parse_log(log_file):
     """解析日志文件，提取 step 和 loss"""
@@ -21,7 +23,7 @@ def parse_log(log_file):
     if not os.path.exists(log_file):
         return steps, losses, timestamps
 
-    pattern = r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*step:(\d+K?) smpl:\d+K? ep:[\dK]+ epch:[\d.]+ loss:([\d.]+)"
+    pattern = r"(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}).*step:(\d+K?) smpl:\d+[MK]? ep:[\dK]+ epch:[\d.]+ loss:([\d.]+)"
     with open(log_file, 'r') as f:
         for line in f:
             match = re.search(pattern, line)
@@ -37,6 +39,15 @@ def parse_log(log_file):
                 losses.append(loss)
                 timestamps.append(ts)
     return steps, losses, timestamps
+
+def utc_to_beijing(utc_ts):
+    """将 UTC 时间戳转换为北京时间"""
+    try:
+        utc_dt = datetime.strptime(utc_ts, "%Y-%m-%d %H:%M:%S")
+        beijing_dt = utc_dt + timedelta(hours=UTC_TO_BEIJING_HOURS)
+        return beijing_dt.strftime("%Y-%m-%d %H:%M:%S")
+    except:
+        return utc_ts
 
 def calculate_duration(start_ts, end_ts):
     """计算运行时长（秒）"""
@@ -100,14 +111,29 @@ def get_training_runs():
         is_complete = final_step >= TOTAL_STEPS
         is_running = check_if_running(filename)
 
+        # 检查日志是否以正常结束标记结尾
+        is_graceful_end = False
+        if timestamps and os.path.exists(log_file):
+            with open(log_file, 'r') as f:
+                for line in reversed(list(f)):
+                    if 'End of training' in line:
+                        is_graceful_end = True
+                        break
+                    if line.strip() and not line.strip().startswith('INFO'):
+                        break
+
         if is_running:
             status = "running"
-        elif is_complete:
+        elif is_complete or is_graceful_end:
             status = "complete"
         else:
             status = "interrupted"
 
         duration_seconds = calculate_duration(timestamps[0], timestamps[-1]) if timestamps else 0
+
+        # 转换 UTC 时间为北京时间
+        beijing_start = utc_to_beijing(timestamps[0]) if timestamps and len(timestamps) > 0 else None
+        beijing_end = utc_to_beijing(timestamps[-1]) if timestamps and len(timestamps) > 1 else None
 
         runs.append({
             "filename": filename,
@@ -124,6 +150,8 @@ def get_training_runs():
             "status": status,
             "duration": format_duration(duration_seconds) if duration_seconds > 0 else "-",
             "duration_seconds": duration_seconds,
+            "start_time_beijing": beijing_start,
+            "end_time_beijing": beijing_end,
             "last_timestamp": timestamps[-1] if timestamps else None,
         })
 
@@ -148,9 +176,20 @@ class LossViewerHandler(SimpleHTTPRequestHandler):
                 is_complete = final_step >= TOTAL_STEPS
                 is_running = check_if_running(filename)
 
+                # 检查日志是否以正常结束标记结尾
+                is_graceful_end = False
+                if timestamps and os.path.exists(log_file):
+                    with open(log_file, 'r') as f:
+                        for line in reversed(list(f)):
+                            if 'End of training' in line:
+                                is_graceful_end = True
+                                break
+                            if line.strip() and not line.strip().startswith('INFO'):
+                                break
+
                 if is_running:
                     status = "running"
-                elif is_complete:
+                elif is_complete or is_graceful_end:
                     status = "complete"
                 else:
                     status = "interrupted"
@@ -201,7 +240,7 @@ class LossViewerHandler(SimpleHTTPRequestHandler):
         .status-running { background: #4ade80; color: #000; }
         .status-complete { background: #00d9ff; color: #000; }
         .status-interrupted { background: #f59e0b; color: #000; }
-        .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 20px; }
+        .stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 20px; }
         .stat-card { background: #0f3460; padding: 15px; border-radius: 8px; text-align: center; }
         .stat-value { font-size: 24px; font-weight: bold; color: #00d9ff; }
         .stat-label { font-size: 12px; color: #888; margin-top: 5px; }
@@ -252,6 +291,10 @@ class LossViewerHandler(SimpleHTTPRequestHandler):
                         <div class="stat-value" id="stat-duration">-</div>
                         <div class="stat-label">运行时间</div>
                     </div>
+                    <div class="stat-card">
+                        <div class="stat-value" id="stat-beijing">-</div>
+                        <div class="stat-label">开始时间 (北京)</div>
+                    </div>
                 </div>
                 <div class="chart-container">
                     <canvas id="lossChart"></canvas>
@@ -299,6 +342,7 @@ class LossViewerHandler(SimpleHTTPRequestHandler):
             document.getElementById('stat-step').textContent = run.final_step.toLocaleString();
             document.getElementById('stat-loss').textContent = run.final_loss.toFixed(4);
             document.getElementById('stat-duration').textContent = run.duration !== '-' ? run.duration : '-';
+            document.getElementById('stat-beijing').textContent = run.start_time_beijing || '-';
 
             const progressEl = document.getElementById('progress');
             progressEl.style.width = run.progress + '%';
